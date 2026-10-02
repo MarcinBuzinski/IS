@@ -1,0 +1,22 @@
+seed: 0
+seeds: [0, 1, 2]
+wines: [red, white]
+test_size: 0.2
+inner_splits: 5
+n_jobs: 1
+bootstrap: 1000
+protocol: full
+output_dir: results
+ablation: true
+robustness: true
+errors: true
+shap: true
+publish_artifacts: true
+trials:
+  xgb_ordinal: 50
+  catboost: 50
+  corn: 30
+  svr: 40
+corn:
+  max_epochs: 40
+  patience: 6

@@ -1,262 +1,404 @@
-"""One-command exam experiment: same split, same metrics, train-only HPO.
+"""Vienas eksperimento įėjimo taškas.
 
-    python -m winequality.run_experiment
+    python -m winequality.run_experiment --config configs/main.yaml
 
-Writes results/metrics.json, comparison tables, figures, and joblib artefacts.
-The frozen test set is used once per model after inner CV on the 80 % train block.
+Hiperparametrai parenkami tik mokymo bloke. Užšaldytas testas vertinamas vieną kartą.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import platform
+import shutil
+import subprocess
+import time
 from pathlib import Path
 
 import joblib
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from winequality.ablation import ablation_kernel, sensitivity_curves
-from winequality.config import (
-    ARTIFACTS,
-    DEFAULT_SEED,
-    FEATURE_NAMES,
-    FIGURES,
-    RESULTS,
-    SPLIT_SEED,
-)
-from winequality.errors import mae_by_true_score, residual_table
-from winequality.metrics import evaluate
-from winequality.robustness import leakage_comparison, noise_stress
-from winequality.splits import frozen_split, load_wine, save_split_indices, xy
-from winequality.svr_model import formula_predict
-from winequality.tune import fit_baselines, tune_mlp, tune_rbf, tune_rf, tune_svr
+from winequality.ablation import ablation_a1, ablation_a4, ablation_a5, ablation_a6, ablation_a7, slim
+from winequality.baselines import MeanRegressor, linear_pipeline
+from winequality.config import ARTIFACTS, FEATURE_NAMES, ROOT, load_config, output_paths
+from winequality.data_io import audit_frame, fetch_raw, sha256_of, write_audit
+from winequality.errors import permutation_ranks, shap_mean_abs, top_errors
+from winequality.hypotheses import compare_pair, decide_deployment, h1_pass, h2_pass, h3_pass, h4_pass, holm
+from winequality.metrics import calibration_bins, evaluate, over_under_counts
+from winequality.robustness import cross_type, missingness_curve, noise_curve, random_split_leakage
+from winequality.splits import assert_no_group_overlap, frozen_split, load_wine, save_split, xy
+from winequality.tune import tune_model
 
 
-def _jsonable(obj):
-    if isinstance(obj, dict):
-        return {str(k): _jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_jsonable(v) for v in obj]
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.floating, np.integer)):
-        return obj.item()
-    if isinstance(obj, Path):
-        return str(obj)
-    return obj
+def _git_commit() -> str | None:
+    candidates = ["git", r"C:\Program Files\Git\cmd\git.exe"]
+    for program in candidates:
+        try:
+            out = subprocess.check_output(
+                [program, "rev-parse", "HEAD"],
+                cwd=ROOT,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            return out.strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+    return None
 
 
-def _bar_mae(table: dict[str, dict], path: Path, title: str) -> None:
-    names = list(table.keys())
-    vals = [table[n]["mae"] for n in names]
-    fig, ax = plt.subplots(figsize=(7.4, 3.4))
-    palette = {
-        "mean": "#888888",
-        "linear": "#888888",
-        "svr": "#8b1e3f",
-        "mlp": "#2d6a4f",
-        "rbf": "#c9a227",
-        "rf": "#4a6fa5",
-    }
-    colors = [palette.get(n, "#555555") for n in names]
-    ax.bar(names, vals, color=colors)
-    ax.set_ylabel("MAE (test)")
-    ax.set_title(title)
-    ax.spines[["top", "right"]].set_visible(False)
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+def _versions() -> dict:
+    import importlib.metadata as metadata
+
+    names = ["numpy", "pandas", "scikit-learn", "xgboost", "catboost", "torch", "optuna", "scipy", "shap"]
+    found = {}
+    for name in names:
+        try:
+            found[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            found[name] = None
+    return found
 
 
-def _confusion(mat: list[list[int]], path: Path, labels: list[str], title: str) -> None:
-    arr = np.asarray(mat)
-    fig, ax = plt.subplots(figsize=(4.6, 4.0))
-    im = ax.imshow(arr, cmap="Blues")
-    ax.set_xticks(range(len(labels)), labels=labels, fontsize=8)
-    ax.set_yticks(range(len(labels)), labels=labels, fontsize=8)
-    ax.set_xlabel("predicted class")
-    ax.set_ylabel("true class")
-    ax.set_title(title)
-    for i in range(arr.shape[0]):
-        for j in range(arr.shape[1]):
-            ax.text(j, i, str(int(arr[i, j])), ha="center", va="center", fontsize=8)
-    fig.colorbar(im, ax=ax, fraction=0.046)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+def _ranges(frame: pd.DataFrame) -> tuple[dict, dict, dict]:
+    low, high, median = {}, {}, {}
+    for name in FEATURE_NAMES:
+        column = frame[name].astype(float)
+        low[name] = float(column.min())
+        high[name] = float(column.max())
+        median[name] = float(column.median())
+    return low, high, median
 
 
-def _sensitivity_plot(curves: dict, path: Path, title: str) -> None:
-    fig, ax = plt.subplots(figsize=(6.2, 3.4))
-    for name, c in curves.items():
-        ax.plot(c["sd_units"], c["f"], marker="o", label=name)
-    ax.axhline(0, color="k", lw=0.4)
-    ax.set_xlabel("feature change (training SD units)")
-    ax.set_ylabel("predicted score f(x)")
-    ax.set_title(title)
-    ax.legend(frameon=False)
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
-
-
-def run_kind(kind: str, seed: int = DEFAULT_SEED) -> dict:
-    df = load_wine(kind)
-    train_idx, test_idx = frozen_split(df, seed=SPLIT_SEED)
-    save_split_indices(kind, train_idx, test_idx)
-    X_tr, y_tr = xy(df, train_idx)
-    X_te, y_te = xy(df, test_idx)
-    groups_tr = df.iloc[train_idx]["group"].to_numpy()
-    df_te = df.iloc[test_idx]
-
-    baselines = fit_baselines(X_tr, y_tr)
-    svr, svr_info = tune_svr(X_tr, y_tr, groups_tr, kernel="rbf", seed=seed)
-    mlp, mlp_info = tune_mlp(X_tr, y_tr, groups_tr, seed=seed)
-    rbf, rbf_info = tune_rbf(X_tr, y_tr, groups_tr, seed=seed)
-    rf, rf_info = tune_rf(X_tr, y_tr, groups_tr, seed=seed)
-
-    pred = {
-        "mean": baselines["mean"].predict(X_te),
-        "linear": baselines["linear"].predict(X_te),
-        "svr": formula_predict(svr, X_te),
-        "mlp": mlp.predict(X_te),
-        "rbf": rbf.predict(X_te),
-        "rf": rf.predict(X_te),
-    }
-    # Guard: formula path must match sklearn.predict for the main model.
-    sk_pred = svr.predict(X_te)
-    max_abs = float(np.max(np.abs(pred["svr"] - sk_pred)))
-    if max_abs >= 1e-6:
-        raise RuntimeError(f"SVR formula path disagrees with sklearn: max|Δ|={max_abs}")
-
-    metrics = {name: evaluate(y_te, p) for name, p in pred.items()}
-    mae_lin = metrics["linear"]["mae"]
-    mae_svr = metrics["svr"]["mae"]
-    h1 = {
-        "threshold_linear_mae_times_0.95": 0.95 * mae_lin,
-        "svr_mae": mae_svr,
-        "relative_improvement": (mae_lin - mae_svr) / mae_lin if mae_lin else 0.0,
-        "h1_holds": mae_svr <= 0.95 * mae_lin,
-    }
-    h2 = {
-        "mae_svr_minus_mae_rf": mae_svr - metrics["rf"]["mae"],
-        "non_inferiority_holds": (mae_svr - metrics["rf"]["mae"]) <= 0.02,
-    }
-
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    bundle = {
-        "pipeline": svr,
-        "kind": kind,
-        "train_min": {n: float(X_tr[:, i].min()) for i, n in enumerate(FEATURE_NAMES)},
-        "train_max": {n: float(X_tr[:, i].max()) for i, n in enumerate(FEATURE_NAMES)},
-        "seed": seed,
-        "split_seed": SPLIT_SEED,
-    }
-    joblib.dump(bundle, ARTIFACTS / f"svr_{kind}.joblib")
-    joblib.dump(mlp, ARTIFACTS / f"mlp_{kind}.joblib")
-    joblib.dump(rbf, ARTIFACTS / f"rbf_{kind}.joblib")
-    joblib.dump(rf, ARTIFACTS / f"rf_{kind}.joblib")
-    joblib.dump(baselines["linear"], ARTIFACTS / f"linear_{kind}.joblib")
-
-    residuals = residual_table(df_te, pred["svr"])
-    residuals.to_csv(RESULTS / f"error_examples_{kind}.csv", index=False)
-
-    sens = sensitivity_curves(svr, X_tr)
-    noise = noise_stress(svr, X_te, y_te, seed=seed)
-    leak = leakage_comparison(
-        df,
-        train_idx,
-        test_idx,
-        seed,
-        group_metrics=metrics["svr"],
-        group_tune=svr_info,
-    )
-    a1 = ablation_kernel(
-        X_tr,
-        y_tr,
-        groups_tr,
-        X_te,
-        y_te,
-        seed,
-        rbf_metrics=metrics["svr"],
-        rbf_tune=svr_info,
-    )
-
-    FIGURES.mkdir(parents=True, exist_ok=True)
-    _bar_mae(metrics, FIGURES / f"mae_{kind}.png", f"{kind} wine — test MAE")
-    _confusion(
-        metrics["svr"]["confusion_class"],
-        FIGURES / f"confusion_class_{kind}.png",
-        ["low", "medium", "high"],
-        f"{kind} SVR — 3-class confusion",
-    )
-    _sensitivity_plot(sens, FIGURES / f"sensitivity_{kind}.png", f"{kind} SVR sensitivity")
-
+def _bundle(kind: str, model_name: str, model, train: pd.DataFrame, params: dict | None, seed: int) -> dict:
+    low, high, median = _ranges(train)
     return {
         "kind": kind,
-        "n": int(len(df)),
-        "n_train": int(len(train_idx)),
-        "n_test": int(len(test_idx)),
-        "n_groups_train": int(df.iloc[train_idx]["group"].nunique()),
-        "n_groups_test": int(df.iloc[test_idx]["group"].nunique()),
-        "formula_vs_sklearn_max_abs": max_abs,
-        "metrics": metrics,
-        "h1": h1,
-        "h2": h2,
-        "svr_tune": svr_info,
-        "mlp_tune": mlp_info,
-        "rbf_tune": rbf_info,
-        "rf_tune": rf_info,
-        "mae_by_true_score": mae_by_true_score(y_te, pred["svr"]),
-        "error_examples": residuals.head(5).to_dict(orient="records"),
-        "sensitivity": sens,
-        "robustness_noise": noise,
-        "robustness_leakage": leak,
-        "ablation_a1_kernel": a1,
+        "model_name": model_name,
+        "model": model,
+        "probabilistic": model_name in {"xgb_ordinal", "corn"},
+        "train_min": low,
+        "train_max": high,
+        "train_median": median,
+        "params": params,
+        "seed": seed,
     }
 
 
-def main() -> None:
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    FIGURES.mkdir(parents=True, exist_ok=True)
-    report = {
-        "split_seed": SPLIT_SEED,
-        "model_seed": DEFAULT_SEED,
-        "note": "Hyperparameters selected by GroupKFold MAE on the training block only.",
-        "wines": {},
-    }
+def _predict_pair(model, x):
+    score = np.asarray(model.predict(x), dtype=float)
+    proba = None
+    if type(model).__name__ in {"XGBOrdinalRegressor", "CornRegressor"}:
+        proba = np.asarray(model.predict_proba(x), dtype=float)
+    return score, proba
+
+
+def _save_figures(path: Path, rows: list[dict], confusion: np.ndarray, wine: str) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.mkdir(parents=True, exist_ok=True)
+    wines = list(dict.fromkeys(row["wine"] for row in rows))
+    models = list(dict.fromkeys(row["model"] for row in rows))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    width = 0.8 / max(len(wines), 1)
+    for i, wine_name in enumerate(wines):
+        heights = []
+        for model in models:
+            match = [row["mae"] for row in rows if row["wine"] == wine_name and row["model"] == model]
+            heights.append(match[0] if match else 0.0)
+        positions = np.arange(len(models)) + i * width
+        ax.bar(positions, heights, width=width, color=str(0.25 + 0.35 * i), label=wine_name)
+    ax.set_xticks(np.arange(len(models)) + width * (len(wines) - 1) / 2)
+    ax.set_xticklabels(models, rotation=20, ha="right")
+    ax.set_ylabel("MAE")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path / "fig_mae.png", dpi=140)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(5.2, 4.4))
+    image = ax.imshow(confusion, cmap="gray_r")
+    ax.set_xlabel("Prognozė")
+    ax.set_ylabel("Eksperto balas")
+    ax.set_title(f"Balų painiava, {wine}")
+    fig.colorbar(image, ax=ax, fraction=0.046)
+    fig.tight_layout()
+    fig.savefig(path / "fig_confusion.png", dpi=140)
+    plt.close(fig)
+
+
+def run(cfg: dict) -> dict:
+    started = time.perf_counter()
+    results_dir, artifact_dir = output_paths(cfg)
+    seed = int(cfg["seed"])
+    np.random.seed(seed)
+    raw_paths = fetch_raw()
+    audits = {}
+    frames = {}
     for kind in ("red", "white"):
-        print(f"=== {kind} ===", flush=True)
-        report["wines"][kind] = run_kind(kind)
-        print(json.dumps(_jsonable(report["wines"][kind]["metrics"]), indent=2), flush=True)
+        frame = load_wine(kind)
+        frames[kind] = frame
+        audits[kind] = audit_frame(frame, kind)
+        audits[kind]["sha256"] = sha256_of(raw_paths[kind])
+    write_audit(results_dir / "data_audit.json", audits)
 
-    out = RESULTS / "metrics.json"
-    out.write_text(json.dumps(_jsonable(report), indent=2), encoding="utf-8")
-    rows = []
-    for kind, block in report["wines"].items():
-        for model, m in block["metrics"].items():
-            rows.append(
+    per_wine = {}
+    comparison = []
+    fitted = {}
+    splits = {}
+    for kind in cfg["wines"]:
+        print(f"=== {kind} ===", flush=True)
+        frame = frames[kind]
+        train_idx, test_idx = frozen_split(frame, test_size=float(cfg["test_size"]), seed=seed)
+        assert_no_group_overlap(frame, train_idx, test_idx)
+        save_split(kind, train_idx, test_idx, seed)
+        splits[kind] = (train_idx, test_idx)
+        x_train, y_train, g_train = xy(frame, train_idx)
+        x_test, y_test, g_test = xy(frame, test_idx)
+        train_frame = frame.iloc[train_idx]
+        models = {}
+        hpo = {}
+        print("baseline", flush=True)
+        mean_model = MeanRegressor().fit(x_train, y_train)
+        linear = linear_pipeline().fit(x_train, y_train)
+        models["mean"] = mean_model
+        models["linear"] = linear
+        for name in ("xgb_ordinal", "catboost", "corn", "svr"):
+            print(f"HPO {name} trials={cfg['trials'][name]}", flush=True)
+            tuned = tune_model(name, x_train, y_train, g_train, cfg, seed)
+            models[name] = tuned["model"]
+            hpo[name] = {key: value for key, value in tuned.items() if key != "model"}
+        predictions = {}
+        metrics = {}
+        for name, model in models.items():
+            score, proba = _predict_pair(model, x_test)
+            predictions[name] = score
+            row = evaluate(y_test, score, proba)
+            row["calibration"] = calibration_bins(y_test, score)
+            row["error_direction"] = over_under_counts(y_test, score)
+            metrics[name] = row
+            comparison.append(
                 {
                     "wine": kind,
-                    "model": model,
-                    "mae": m["mae"],
-                    "mae_rounded": m["mae_rounded"],
-                    "acc_0.5": m["acc_0.5"],
-                    "acc_1.0": m["acc_1.0"],
-                    "kappa_w": m["kappa_w"],
-                    "macro_f1": m["macro_f1"],
+                    "model": name,
+                    "mae": row["mae"],
+                    "mae_rounded": row["mae_rounded"],
+                    "rmse": row["rmse"],
+                    "acc_0.5": row["acc_0.5"],
+                    "acc_1.0": row["acc_1.0"],
+                    "kappa_w": row["kappa_w"],
+                    "macro_f1": row["macro_f1"],
+                    "log_loss": row.get("log_loss"),
+                    "brier": row.get("brier"),
                 }
             )
-    pd.DataFrame(rows).to_csv(RESULTS / "comparison.csv", index=False)
-    print(f"wrote {out}", flush=True)
+            joblib.dump(_bundle(kind, name, model, train_frame, hpo.get(name, {}).get("chosen", {}).get("params"), seed), artifact_dir / f"{name}_{kind}.joblib")
+        (results_dir / f"hpo_{kind}.json").write_text(
+            json.dumps(hpo, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        per_wine[kind] = {
+            "n_train": int(len(train_idx)),
+            "n_test": int(len(test_idx)),
+            "group_overlap": 0,
+            "metrics": metrics,
+            "test_used_in_hpo": False,
+        }
+        fitted[kind] = {
+            "models": models,
+            "predictions": predictions,
+            "x_train": x_train,
+            "y_train": y_train,
+            "g_train": g_train,
+            "x_test": x_test,
+            "y_test": y_test,
+            "g_test": g_test,
+            "frame": frame,
+            "train_idx": train_idx,
+            "test_idx": test_idx,
+            "params": {name: hpo[name]["chosen"]["params"] for name in hpo},
+        }
+
+    hypothesis_rows = {}
+    intervals = {}
+    for kind, pack in fitted.items():
+        m = per_wine[kind]["metrics"]
+        pred = pack["predictions"]
+        y_test = pack["y_test"]
+        groups = pack["g_test"]
+        n_boot = int(cfg["bootstrap"])
+        pair = {
+            "xgb_vs_catboost": compare_pair(y_test, pred["xgb_ordinal"], pred["catboost"], groups, n_boot, seed),
+            "xgb_vs_corn": compare_pair(y_test, pred["xgb_ordinal"], pred["corn"], groups, n_boot, seed + 2),
+            "xgb_vs_svr": compare_pair(y_test, pred["xgb_ordinal"], pred["svr"], groups, n_boot, seed + 3),
+            "svr_vs_linear": compare_pair(y_test, pred["svr"], pred["linear"], groups, n_boot, seed + 4),
+        }
+        intervals[kind] = pair
+        hypothesis_rows[kind] = {
+            "H1": h1_pass(m["xgb_ordinal"]["mae"], m["linear"]["mae"], m["xgb_ordinal"]["kappa_w"], m["linear"]["kappa_w"]),
+            "H2": h2_pass(pair["xgb_vs_catboost"]["mae"], pair["xgb_vs_catboost"]["kappa_w"]),
+            "H3": h3_pass(m["xgb_ordinal"]["mae"], m["corn"]["mae"]),
+            "H4": h4_pass(m["svr"]["mae"], m["linear"]["mae"], m["svr"]["kappa_w"], m["xgb_ordinal"]["kappa_w"]),
+        }
+    h1 = all(row["H1"] for row in hypothesis_rows.values())
+    h2 = all(row["H2"] for row in hypothesis_rows.values())
+    h3 = all(row["H3"] for row in hypothesis_rows.values())
+    h4 = all(row["H4"] for row in hypothesis_rows.values())
+    chosen_name = decide_deployment(h1, h2)
+    secondary_p = {}
+    for kind, pair in intervals.items():
+        for label, payload in pair.items():
+            secondary_p[f"{kind}:{label}"] = payload["mae"]["p_two_sided"]
+    decision = {
+        "H1": h1,
+        "H2": h2,
+        "H3": h3,
+        "H4": h4,
+        "per_wine": hypothesis_rows,
+        "selected_model": chosen_name,
+        "rule": "Jei H1 nepasitvirtina, lieka tiesinė regresija. Jei H1 pasitvirtina, bet H2 ne, praktinis modelis yra CatBoost. Kitu atveju lieka XGBOrdinal.",
+        "holm_secondary_mae": holm(secondary_p),
+        "covers_both_wines": list(cfg["wines"]) == ["red", "white"],
+    }
+
+    for kind, pack in fitted.items():
+        bundle = _bundle(
+            kind,
+            chosen_name,
+            pack["models"][chosen_name],
+            pack["frame"].iloc[pack["train_idx"]],
+            pack["params"].get(chosen_name),
+            seed,
+        )
+        joblib.dump(bundle, artifact_dir / f"selected_{kind}.joblib")
+        if cfg.get("publish_artifacts", cfg.get("protocol") == "full"):
+            ARTIFACTS.mkdir(parents=True, exist_ok=True)
+            joblib.dump(bundle, ARTIFACTS / f"selected_{kind}.joblib")
+
+    extras = {"ablation": None, "robustness": None, "errors": None}
+    if cfg.get("ablation", True):
+        print("abliacijos", flush=True)
+        try:
+            ablation = {}
+            for kind, pack in fitted.items():
+                params = pack["params"]
+                ablation[kind] = {
+                    "A1": slim(ablation_a1(params["xgb_ordinal"], cfg, seed, pack["x_train"], pack["y_train"], pack["x_test"], pack["y_test"])),
+                    "A2": {
+                        "xgb_ordinal": slim(per_wine[kind]["metrics"]["xgb_ordinal"]),
+                        "catboost": slim(per_wine[kind]["metrics"]["catboost"]),
+                    },
+                    "A3": {
+                        "xgb_ordinal": slim(per_wine[kind]["metrics"]["xgb_ordinal"]),
+                        "corn": slim(per_wine[kind]["metrics"]["corn"]),
+                    },
+                    "A4": slim(ablation_a4(params["svr"], cfg, seed, pack["x_train"], pack["y_train"], pack["x_test"], pack["y_test"])),
+                    "A5": {
+                        "xgb_ordinal": slim(ablation_a5("xgb_ordinal", params["xgb_ordinal"], cfg, seed, pack["x_train"], pack["y_train"], pack["x_test"], pack["y_test"])),
+                        "catboost": slim(ablation_a5("catboost", params["catboost"], cfg, seed, pack["x_train"], pack["y_train"], pack["x_test"], pack["y_test"])),
+                    },
+                    "A7": slim(ablation_a7(params["xgb_ordinal"], cfg, seed, pack["x_train"], pack["y_train"], pack["x_test"], pack["y_test"])),
+                }
+            if set(cfg["wines"]) >= {"red", "white"}:
+                ablation["A6"] = slim(
+                    ablation_a6(
+                        fitted["red"]["params"]["xgb_ordinal"],
+                        cfg,
+                        seed,
+                        {kind: frames[kind] for kind in ("red", "white")},
+                        splits,
+                    )
+                )
+            extras["ablation"] = ablation
+        except Exception as exc:
+            extras["ablation"] = {"error": str(exc)}
+
+    if cfg.get("robustness", True):
+        print("atsparumas", flush=True)
+        try:
+            robust = {}
+            for kind, pack in fitted.items():
+                model = pack["models"][chosen_name]
+                robust[kind] = {
+                    "noise": noise_curve(model, pack["x_train"], pack["x_test"], pack["y_test"], [0.05, 0.10, 0.20], seed),
+                    "missingness": missingness_curve(model, pack["x_train"], pack["x_test"], pack["y_test"], [0.05, 0.10], seed),
+                    "random_split": random_split_leakage(pack["params"]["xgb_ordinal"], cfg, seed, pack["frame"]),
+                }
+            if "red" in fitted and "white" in fitted:
+                robust["cross_type"] = {
+                    "white_model_on_red": cross_type(fitted["white"]["models"][chosen_name], fitted["red"]["x_test"], fitted["red"]["y_test"]),
+                    "red_model_on_white": cross_type(fitted["red"]["models"][chosen_name], fitted["white"]["x_test"], fitted["white"]["y_test"]),
+                }
+            extras["robustness"] = robust
+        except Exception as exc:
+            extras["robustness"] = {"error": str(exc)}
+
+    if cfg.get("errors", True):
+        print("klaidų analizė", flush=True)
+        try:
+            error_report = {}
+            for kind, pack in fitted.items():
+                model = pack["models"][chosen_name]
+                score = pack["predictions"][chosen_name]
+                test_frame = pack["frame"].iloc[pack["test_idx"]][FEATURE_NAMES]
+                rows = top_errors(test_frame, pack["y_test"], score)
+                pd.DataFrame(rows).to_csv(results_dir / f"error_examples_{kind}.csv", index=False)
+                item = {
+                    "model": chosen_name,
+                    "direction": over_under_counts(pack["y_test"], score),
+                    "bias_by_score": per_wine[kind]["metrics"][chosen_name]["bias_by_score"],
+                    "permutation_importance": permutation_ranks(model, pack["x_test"], pack["y_test"], seed),
+                }
+                if cfg.get("shap", True):
+                    try:
+                        item["shap_mean_abs"] = shap_mean_abs(pack["models"]["xgb_ordinal"], pack["x_test"])
+                        item["shap_catboost"] = shap_mean_abs(pack["models"]["catboost"], pack["x_test"])
+                    except Exception as exc:
+                        item["shap_error"] = str(exc)
+                error_report[kind] = item
+            extras["errors"] = error_report
+        except Exception as exc:
+            extras["errors"] = {"error": str(exc)}
+
+    figure_wine = cfg["wines"][0]
+    confusion = np.asarray(per_wine[figure_wine]["metrics"][chosen_name]["confusion_score"])
+    _save_figures(results_dir / "figures", comparison, confusion, figure_wine)
+    pd.DataFrame(comparison).to_csv(results_dir / "comparison.csv", index=False)
+    shutil.copyfile(Path(cfg["_config_path"]), results_dir / "config.yaml")
+
+    payload = {
+        "protocol": cfg.get("protocol"),
+        "seed": seed,
+        "seeds_recorded": cfg.get("seeds"),
+        "selected_model": chosen_name,
+        "hypotheses": decision,
+        "intervals": intervals,
+        "per_wine": per_wine,
+        "extras": extras,
+        "git_commit": _git_commit(),
+        "python": platform.python_version(),
+        "versions": _versions(),
+        "elapsed_sec": time.perf_counter() - started,
+        "test_evaluated_once": True,
+    }
+    (results_dir / "metrics.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"baigta per {payload['elapsed_sec']:.1f} s, modelis={chosen_name}", flush=True)
+    print(results_dir / "metrics.json", flush=True)
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Vyno kokybės eksperimentas.")
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args(argv)
+    cfg = load_config(args.config)
+    cfg["_config_path"] = str(Path(args.config).resolve())
+    run(cfg)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

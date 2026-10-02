@@ -1,11 +1,12 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-data/raw/*.csv
-data/raw/*.tmp
-artifacts/*.joblib
-~$*
-
+data/raw/
+results/**/artifacts/
+results/smoke/
+results/figures_ataskaita/
 .ipynb_checkpoints/
-
+senas bandymas/
+catboost_info/
+~$*

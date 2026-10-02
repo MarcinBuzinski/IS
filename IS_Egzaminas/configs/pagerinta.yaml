@@ -1,0 +1,13 @@
+seed: 0
+wines: [red, white]
+test_size: 0.2
+inner_splits: 3
+n_jobs: 4
+protocol: pagerinta
+output_dir: results/pagerinta
+tail_weight: 2.0
+asym_alpha: 2.0
+trials:
+  cat_asym: 6
+  cat_ordinal: 6
+  lgbm_ordinal: 6

@@ -1,86 +1,80 @@
-"""Robustness: group-split leakage vs random split, and feature noise."""
+"""Triukšmo, trūkstamumo, atsitiktinio skaidymo ir tipų poslinkio bandymai.
+
+Šie skaičiai yra diagnostika. Jie nekeičia H1–H4 sprendimo.
+"""
 
 from __future__ import annotations
 
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
-from winequality.config import DEFAULT_SEED
+from winequality.config import FEATURE_NAMES, TARGET
 from winequality.metrics import evaluate
 from winequality.splits import stratify_label
-from winequality.tune import tune_svr
+from winequality.tune import _fit, make_model
 
 
-def random_split_indices(df, test_size: float = 0.2, seed: int = DEFAULT_SEED):
-    """Leakage-prone split: duplicate groups may land on both sides."""
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    y = stratify_label(df["quality"]).to_numpy()
-    train_idx, test_idx = next(sss.split(np.zeros((len(df), 1)), y))
-    return train_idx, test_idx
+def _brief(y, pred) -> dict:
+    row = evaluate(y, pred)
+    return {"mae": row["mae"], "kappa_w": row["kappa_w"]}
 
 
-def group_overlap(df, train_idx, test_idx) -> int:
-    return len(set(df.iloc[train_idx]["group"]) & set(df.iloc[test_idx]["group"]))
-
-
-def noise_stress(
-    pipeline,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-    scale: float = 0.10,
-    seed: int = DEFAULT_SEED,
-) -> dict:
-    """Add N(0, scale · train-style column std of the *test* features) noise.
-
-    Uses the test matrix std only to set the perturbation size, not to retrain.
-    """
-    rng = np.random.default_rng(seed)
-    std = X_test.std(axis=0, ddof=1)
+def noise_curve(model, x_train, x_test, y_test, levels: list[float], seed: int) -> dict:
+    std = np.nanstd(np.asarray(x_train, dtype=float), axis=0, ddof=1)
     std = np.where(std < 1e-12, 1.0, std)
-    X_noisy = X_test + rng.normal(0.0, scale, size=X_test.shape) * std
-    clean = evaluate(y_test, pipeline.predict(X_test))
-    noisy = evaluate(y_test, pipeline.predict(X_noisy))
-    return {
-        "noise_scale_of_std": scale,
-        "mae_clean": clean["mae"],
-        "mae_noisy": noisy["mae"],
-        "mae_delta": noisy["mae"] - clean["mae"],
-        "acc_1.0_clean": clean["acc_1.0"],
-        "acc_1.0_noisy": noisy["acc_1.0"],
-    }
+    rng = np.random.default_rng(seed)
+    out = {"0": _brief(y_test, model.predict(x_test))}
+    for level in levels:
+        noisy = np.asarray(x_test, dtype=float) + rng.normal(0.0, level, size=np.shape(x_test)) * std
+        out[str(level)] = _brief(y_test, model.predict(noisy))
+    return out
 
 
-def leakage_comparison(
-    df,
-    train_idx_group,
-    test_idx_group,
-    seed: int,
-    group_metrics: dict | None = None,
-    group_tune: dict | None = None,
-) -> dict:
-    """A6: group-aware split vs random split, same SVR protocol."""
-    from winequality.splits import xy
-
-    def _run(tr, te, label: str, metrics=None, info=None) -> dict:
-        if metrics is None or info is None:
-            X_tr, y_tr = xy(df, tr)
-            X_te, y_te = xy(df, te)
-            groups_tr = df.iloc[tr]["group"].to_numpy()
-            model, info = tune_svr(X_tr, y_tr, groups_tr, seed=seed)
-            metrics = evaluate(y_te, model.predict(X_te))
-        return {
-            "label": label,
-            "n_train": int(len(tr)),
-            "n_test": int(len(te)),
-            "overlapping_groups": group_overlap(df, tr, te),
-            "metrics": metrics,
-            "tune": info,
+def missingness_curve(model, x_train, x_test, y_test, rates: list[float], seed: int) -> dict:
+    median = np.nanmedian(np.asarray(x_train, dtype=float), axis=0)
+    rng = np.random.default_rng(seed)
+    out = {}
+    flat_n = int(np.size(x_test))
+    for rate in rates:
+        corrupted = np.array(x_test, dtype=float, copy=True)
+        mask = rng.random(corrupted.shape) < rate
+        corrupted[mask] = np.take(median, np.where(mask)[1])
+        out[str(rate)] = {
+            **_brief(y_test, model.predict(corrupted)),
+            "masked_cells": int(mask.sum()),
+            "n_cells": flat_n,
         }
+    return out
 
-    rand_tr, rand_te = random_split_indices(df, seed=seed)
+
+def random_split_leakage(params: dict, cfg: dict, seed: int, frame: pd.DataFrame) -> dict:
+    """Parodo dublikatų nutekėjimą, kai skaidymas nepaiso grupių."""
+    idx = np.arange(len(frame))
+    train_idx, test_idx = train_test_split(
+        idx,
+        test_size=0.2,
+        random_state=seed,
+        stratify=stratify_label(frame[TARGET]),
+    )
+    train_groups = set(frame.iloc[train_idx]["group"])
+    test_groups = set(frame.iloc[test_idx]["group"])
+    overlap = train_groups & test_groups
+    columns = FEATURE_NAMES
+    model = make_model("xgb_ordinal", params, cfg, seed)
+    x_train = frame.iloc[train_idx][columns].to_numpy(float)
+    y_train = frame.iloc[train_idx][TARGET].to_numpy(float)
+    x_test = frame.iloc[test_idx][columns].to_numpy(float)
+    y_test = frame.iloc[test_idx][TARGET].to_numpy(float)
+    _fit(model, x_train, y_train, frame.iloc[train_idx]["group"].to_numpy())
     return {
-        "group_aware": _run(
-            train_idx_group, test_idx_group, "group_aware", group_metrics, group_tune
-        ),
-        "random": _run(rand_tr, rand_te, "random"),
+        "note": "Diagnostika, nenaudojama modelio pasirinkimui.",
+        "overlapping_groups": len(overlap),
+        "metrics": _brief(y_test, model.predict(x_test)),
     }
+
+
+def cross_type(model, x_other, y_other) -> dict:
+    row = _brief(y_other, model.predict(x_other))
+    row["note"] = "Kito vyno tipo testo aibė; tai ne veikimo režimas."
+    return row

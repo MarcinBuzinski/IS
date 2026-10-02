@@ -1,86 +1,95 @@
-"""Duplicate groups, stratification helper, frozen 80/20 split.
+"""Dublikatų grupės ir užšaldytas stratifikuotas grupinis 80/20 skaidymas.
 
-Identical 11-feature rows share a group id and never cross the train/test cut
-(Kapoor & Narayanan 2023 leakage). Stratification merges rare scores 3 with 4
-and 9 with 8 so StratifiedGroupKFold has enough members per stratum.
+Identiškos 11 požymių eilutės gauna tą patį grupės ID ir nepersidengia
+tarp mokymo ir testo. Reti balai 3 ir 9 stratifikacijoje sujungiami su 4 ir 8.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold
 
-from winequality.config import (
-    DATA_SPLITS,
-    FEATURE_NAMES,
-    SPLIT_SEED,
-    TARGET,
-    TYPE_COL,
-)
-from winequality.data_io import fetch_raw
+from winequality.config import DATA_SPLITS, FEATURE_NAMES, SPLIT_SEED, TARGET, TYPE_COL
+from winequality.data_io import fetch_raw, read_wine_csv
 
 
 def feature_group_id(row: pd.Series) -> str:
-    payload = "|".join(f"{row[c]:.10g}" for c in FEATURE_NAMES)
+    payload = "|".join(f"{float(row[column]):.10g}" for column in FEATURE_NAMES)
     return hashlib.sha256(payload.encode("ascii")).hexdigest()[:16]
 
 
-def stratify_label(quality: pd.Series) -> pd.Series:
-    y = quality.astype(int)
-    return y.replace({3: 4, 9: 8})
+def stratify_label(quality: pd.Series | np.ndarray) -> np.ndarray:
+    labels = np.rint(np.asarray(quality)).astype(int)
+    labels = np.where(labels == 3, 4, labels)
+    labels = np.where(labels == 9, 8, labels)
+    return labels
 
 
 def load_wine(kind: str) -> pd.DataFrame:
-    """Load one wine type, attach type and duplicate-group ids."""
     paths = fetch_raw()
     if kind not in paths:
-        raise ValueError(f"kind must be 'red' or 'white', got {kind!r}")
-    df = pd.read_csv(paths[kind], sep=";")
-    missing = [c for c in FEATURE_NAMES + [TARGET] if c not in df.columns]
-    if missing:
-        raise ValueError(f"unexpected columns, missing {missing}")
-    df = df.copy()
-    df[TYPE_COL] = 0 if kind == "red" else 1
-    df["group"] = df.apply(feature_group_id, axis=1)
-    df["stratum"] = stratify_label(df[TARGET])
-    return df
+        raise ValueError(f"kind turi būti 'red' arba 'white', gauta {kind!r}")
+    frame = read_wine_csv(paths[kind])
+    frame[TYPE_COL] = 0 if kind == "red" else 1
+    frame["group"] = frame.apply(feature_group_id, axis=1)
+    frame["stratum"] = stratify_label(frame[TARGET])
+    return frame
 
 
 def frozen_split(
-    df: pd.DataFrame,
+    frame: pd.DataFrame,
     test_size: float = 0.2,
     seed: int = SPLIT_SEED,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return train/test positional indices. Groups never split across the cut.
-
-    Implemented as StratifiedGroupKFold with n_splits = round(1/test_size)
-    (5-fold → 20 % test). Fold 0 is the frozen test set.
-    """
+    """Grąžina mokymo ir testo indeksus. 0-oji StratifiedGroupKFold klostė yra testas."""
     n_splits = max(2, int(round(1.0 / test_size)))
-    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    X_dummy = np.zeros((len(df), 1))
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    dummy = np.zeros((len(frame), 1))
     train_idx, test_idx = next(
-        cv.split(X_dummy, df["stratum"].to_numpy(), df["group"].to_numpy())
+        splitter.split(dummy, frame["stratum"].to_numpy(), frame["group"].to_numpy())
     )
-    overlap = set(df.iloc[train_idx]["group"]) & set(df.iloc[test_idx]["group"])
+    overlap = set(frame.iloc[train_idx]["group"]) & set(frame.iloc[test_idx]["group"])
     if overlap:
-        raise RuntimeError(f"group leakage: {len(overlap)} groups in both splits")
+        raise RuntimeError(f"grupių nutekėjimas: {len(overlap)} grupės abiejose pusėse")
     return train_idx, test_idx
 
 
-def save_split_indices(kind: str, train_idx: np.ndarray, test_idx: np.ndarray) -> Path:
+def assert_no_group_overlap(frame: pd.DataFrame, train_idx: np.ndarray, test_idx: np.ndarray) -> int:
+    overlap = set(frame.iloc[train_idx]["group"]) & set(frame.iloc[test_idx]["group"])
+    if overlap:
+        raise RuntimeError(f"grupių sankirta nėra tuščia: {len(overlap)}")
+    return 0
+
+
+def save_split(kind: str, train_idx: np.ndarray, test_idx: np.ndarray, seed: int = SPLIT_SEED) -> Path:
     DATA_SPLITS.mkdir(parents=True, exist_ok=True)
-    path = DATA_SPLITS / f"{kind}_split_seed{SPLIT_SEED}.npz"
-    np.savez(path, train_idx=train_idx, test_idx=test_idx)
+    path = DATA_SPLITS / f"{kind}.json"
+    payload = {
+        "kind": kind,
+        "seed": int(seed),
+        "train_idx": train_idx.astype(int).tolist(),
+        "test_idx": test_idx.astype(int).tolist(),
+        "group_overlap": 0,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
-def xy(df: pd.DataFrame, idx: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    part = df if idx is None else df.iloc[idx]
-    X = part[FEATURE_NAMES].to_numpy(dtype=float)
+def load_split(kind: str) -> tuple[np.ndarray, np.ndarray]:
+    path = DATA_SPLITS / f"{kind}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return np.asarray(payload["train_idx"], dtype=int), np.asarray(payload["test_idx"], dtype=int)
+
+
+def xy(frame: pd.DataFrame, idx: np.ndarray | None = None, columns: list[str] | None = None):
+    part = frame if idx is None else frame.iloc[idx]
+    columns = columns or FEATURE_NAMES
+    x = part[columns].to_numpy(dtype=float)
     y = part[TARGET].to_numpy(dtype=float)
-    return X, y
+    groups = part["group"].to_numpy()
+    return x, y, groups

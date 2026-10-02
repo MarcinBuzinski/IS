@@ -1,0 +1,248 @@
+{
+  "cat_asym": {
+    "chosen": {
+      "number": 5,
+      "mae": 0.5181950817854809,
+      "kappa": 0.5069392528842477,
+      "params": {
+        "iterations": 362,
+        "depth": 8,
+        "learning_rate": 0.05768466637185045,
+        "l2_leaf_reg": 1.9404569015980722
+      }
+    },
+    "trials": [
+      {
+        "number": 0,
+        "mae": 0.5224251488747623,
+        "kappa": 0.4662970896322463,
+        "params": {
+          "iterations": 223,
+          "depth": 4,
+          "learning_rate": 0.0722388872628237,
+          "l2_leaf_reg": 4.515237226437699
+        }
+      },
+      {
+        "number": 1,
+        "mae": 0.5247088363600279,
+        "kappa": 0.4344561571689008,
+        "params": {
+          "iterations": 281,
+          "depth": 6,
+          "learning_rate": 0.03073629243657108,
+          "l2_leaf_reg": 2.7551193599061787
+        }
+      },
+      {
+        "number": 2,
+        "mae": 0.5666449185732211,
+        "kappa": 0.47752971519412596,
+        "params": {
+          "iterations": 406,
+          "depth": 8,
+          "learning_rate": 0.11982442739711682,
+          "l2_leaf_reg": 1.2537139484724784
+        }
+      },
+      {
+        "number": 3,
+        "mae": 0.5195032860204994,
+        "kappa": 0.4798720580219422,
+        "params": {
+          "iterations": 395,
+          "depth": 8,
+          "learning_rate": 0.041033405495313355,
+          "l2_leaf_reg": 3.724384549468487
+        }
+      },
+      {
+        "number": 4,
+        "mae": 0.5236160783254332,
+        "kappa": 0.443568856104791,
+        "params": {
+          "iterations": 184,
+          "depth": 4,
+          "learning_rate": 0.05467377335411505,
+          "l2_leaf_reg": 1.3887018785223575
+        }
+      },
+      {
+        "number": 5,
+        "mae": 0.5181950817854809,
+        "kappa": 0.5069392528842477,
+        "params": {
+          "iterations": 362,
+          "depth": 8,
+          "learning_rate": 0.05768466637185045,
+          "l2_leaf_reg": 1.9404569015980722
+        }
+      }
+    ],
+    "test_used": false
+  },
+  "cat_ordinal": {
+    "chosen": {
+      "number": 0,
+      "mae": 0.4958740252406393,
+      "kappa": 0.5437530593102003,
+      "params": {
+        "iterations": 388,
+        "depth": 5,
+        "learning_rate": 0.03447290108237669,
+        "l2_leaf_reg": 4.889583611506082
+      }
+    },
+    "trials": [
+      {
+        "number": 0,
+        "mae": 0.4958740252406393,
+        "kappa": 0.5437530593102003,
+        "params": {
+          "iterations": 388,
+          "depth": 5,
+          "learning_rate": 0.03447290108237669,
+          "l2_leaf_reg": 4.889583611506082
+        }
+      },
+      {
+        "number": 1,
+        "mae": 0.4958679365555236,
+        "kappa": 0.5339819866233104,
+        "params": {
+          "iterations": 289,
+          "depth": 6,
+          "learning_rate": 0.11907012996906396,
+          "l2_leaf_reg": 5.843024436331068
+        }
+      },
+      {
+        "number": 2,
+        "mae": 0.4951764981657993,
+        "kappa": 0.5253534073170055,
+        "params": {
+          "iterations": 365,
+          "depth": 7,
+          "learning_rate": 0.04747839018453694,
+          "l2_leaf_reg": 4.472018255987228
+        }
+      },
+      {
+        "number": 3,
+        "mae": 0.49934184513336694,
+        "kappa": 0.5202955803900028,
+        "params": {
+          "iterations": 194,
+          "depth": 6,
+          "learning_rate": 0.09555633383023908,
+          "l2_leaf_reg": 1.7026060047912708
+        }
+      },
+      {
+        "number": 4,
+        "mae": 0.49968212980956533,
+        "kappa": 0.5146563781065326,
+        "params": {
+          "iterations": 248,
+          "depth": 7,
+          "learning_rate": 0.14789802519854614,
+          "l2_leaf_reg": 5.379455900643585
+        }
+      },
+      {
+        "number": 5,
+        "mae": 0.49771800337360855,
+        "kappa": 0.5304298689390569,
+        "params": {
+          "iterations": 180,
+          "depth": 8,
+          "learning_rate": 0.13867140196171526,
+          "l2_leaf_reg": 7.300712169818552
+        }
+      }
+    ],
+    "test_used": false
+  },
+  "lgbm_ordinal": {
+    "chosen": {
+      "number": 0,
+      "mae": 0.48810170854742574,
+      "kappa": 0.5219507086610976,
+      "params": {
+        "iterations": 207,
+        "depth": 8,
+        "learning_rate": 0.11954518517901791,
+        "l2_leaf_reg": 2.0768592075225363
+      }
+    },
+    "trials": [
+      {
+        "number": 0,
+        "mae": 0.48810170854742574,
+        "kappa": 0.5219507086610976,
+        "params": {
+          "iterations": 207,
+          "depth": 8,
+          "learning_rate": 0.11954518517901791,
+          "l2_leaf_reg": 2.0768592075225363
+        }
+      },
+      {
+        "number": 1,
+        "mae": 0.49052229870379427,
+        "kappa": 0.5175282431756774,
+        "params": {
+          "iterations": 350,
+          "depth": 7,
+          "learning_rate": 0.1020951965284526,
+          "l2_leaf_reg": 2.368212962227783
+        }
+      },
+      {
+        "number": 2,
+        "mae": 0.5008807488249706,
+        "kappa": 0.525225566628022,
+        "params": {
+          "iterations": 350,
+          "depth": 5,
+          "learning_rate": 0.048756851885119204,
+          "l2_leaf_reg": 1.0511977278690188
+        }
+      },
+      {
+        "number": 3,
+        "mae": 0.501427428298939,
+        "kappa": 0.5219438540263411,
+        "params": {
+          "iterations": 203,
+          "depth": 5,
+          "learning_rate": 0.10118772909139503,
+          "l2_leaf_reg": 1.9542619290848173
+        }
+      },
+      {
+        "number": 4,
+        "mae": 0.49870730767952587,
+        "kappa": 0.5379371476494941,
+        "params": {
+          "iterations": 224,
+          "depth": 8,
+          "learning_rate": 0.05015742965383211,
+          "l2_leaf_reg": 1.7661938242702104
+        }
+      },
+      {
+        "number": 5,
+        "mae": 0.49819488929134376,
+        "kappa": 0.5142554177882274,
+        "params": {
+          "iterations": 410,
+          "depth": 4,
+          "learning_rate": 0.12382242247284303,
+          "l2_leaf_reg": 1.010951556705079
+        }
+      }
+    ],
+    "test_used": false
+  }
+}

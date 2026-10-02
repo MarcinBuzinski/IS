@@ -1,0 +1,252 @@
+{
+  "seed": 0,
+  "protocol": "Diagnostika jau parinktais parametrais. Testas naudojamas vertinimui, ne paieškai.",
+  "reproduction": {
+    "red": {
+      "catboost_mae": 0.45069969097281015,
+      "catboost_published": 0.45069969097281015,
+      "xgb_mae": 0.46380463937682065,
+      "xgb_published": 0.46380463937682065
+    },
+    "white": {
+      "catboost_mae": 0.5151374757752183,
+      "catboost_published": 0.5151374757752183,
+      "xgb_mae": 0.5322430107587486,
+      "xgb_published": 0.5322430107587486
+    }
+  },
+  "ablation_a1": {
+    "red": {
+      "xgb_ordinal": {
+        "mae": 0.46380463937682065,
+        "kappa_w": 0.6250969286268164,
+        "mae_rounded": 0.390625
+      },
+      "xgb_classifier": {
+        "mae": 0.4573741598295989,
+        "mae_rounded": 0.396875,
+        "kappa_w": 0.5993506717783994,
+        "macro_f1": 0.5468137254901961
+      },
+      "xgb_regressor": {
+        "mae": 0.4819046422839165,
+        "mae_rounded": 0.4,
+        "kappa_w": 0.5981835695610294,
+        "macro_f1": 0.5198213431714149
+      }
+    },
+    "white": {
+      "xgb_ordinal": {
+        "mae": 0.5322430107587486,
+        "kappa_w": 0.5306236832153854,
+        "mae_rounded": 0.48621041879468846
+      },
+      "xgb_classifier": {
+        "mae": 0.5264088511613167,
+        "mae_rounded": 0.4759959141981614,
+        "kappa_w": 0.5351527873377205,
+        "macro_f1": 0.49455764396948254
+      },
+      "xgb_regressor": {
+        "mae": 0.5481405082835119,
+        "mae_rounded": 0.4964249233912155,
+        "kappa_w": 0.5481201686577652,
+        "macro_f1": 0.5491776794815787
+      }
+    }
+  },
+  "permutation_catboost": {
+    "red": [
+      {
+        "feature": "alcohol",
+        "mae_increase": 0.13950471347020182
+      },
+      {
+        "feature": "sulphates",
+        "mae_increase": 0.05474690635580678
+      },
+      {
+        "feature": "volatile acidity",
+        "mae_increase": 0.034604470535928224
+      },
+      {
+        "feature": "total sulfur dioxide",
+        "mae_increase": 0.03242129180779248
+      },
+      {
+        "feature": "density",
+        "mae_increase": 0.016708615132172457
+      },
+      {
+        "feature": "fixed acidity",
+        "mae_increase": 0.0055907208257918286
+      },
+      {
+        "feature": "citric acid",
+        "mae_increase": 0.0012729893986249796
+      },
+      {
+        "feature": "free sulfur dioxide",
+        "mae_increase": 0.0007221226666011438
+      },
+      {
+        "feature": "residual sugar",
+        "mae_increase": 0.00016808257257008296
+      },
+      {
+        "feature": "pH",
+        "mae_increase": -0.0006276868286538506
+      },
+      {
+        "feature": "chlorides",
+        "mae_increase": -0.0015988492426323275
+      }
+    ],
+    "white": [
+      {
+        "feature": "alcohol",
+        "mae_increase": 0.1260552088784175
+      },
+      {
+        "feature": "volatile acidity",
+        "mae_increase": 0.06936388587055561
+      },
+      {
+        "feature": "free sulfur dioxide",
+        "mae_increase": 0.024261790845449816
+      },
+      {
+        "feature": "residual sugar",
+        "mae_increase": 0.017100463740832583
+      },
+      {
+        "feature": "citric acid",
+        "mae_increase": 0.011783668708323725
+      },
+      {
+        "feature": "density",
+        "mae_increase": 0.010645940686852984
+      },
+      {
+        "feature": "pH",
+        "mae_increase": 0.007239315202251917
+      },
+      {
+        "feature": "total sulfur dioxide",
+        "mae_increase": 0.007181666440137469
+      },
+      {
+        "feature": "sulphates",
+        "mae_increase": 0.006577969732895106
+      },
+      {
+        "feature": "chlorides",
+        "mae_increase": 0.005231018646690444
+      },
+      {
+        "feature": "fixed acidity",
+        "mae_increase": 0.005165258217273894
+      }
+    ]
+  },
+  "noise_catboost": {
+    "red": {
+      "0": {
+        "mae": 0.45069969097281015,
+        "kappa_w": 0.589893811790553
+      },
+      "0.05": {
+        "mae": 0.4572140344462142,
+        "kappa_w": 0.5824232776811165
+      },
+      "0.1": {
+        "mae": 0.4571240026468189,
+        "kappa_w": 0.5672174585066059
+      },
+      "0.2": {
+        "mae": 0.4607693799963387,
+        "kappa_w": 0.5380173243503368
+      }
+    },
+    "white": {
+      "0": {
+        "mae": 0.5151374757752183,
+        "kappa_w": 0.5268143315791036
+      },
+      "0.05": {
+        "mae": 0.5185640229036262,
+        "kappa_w": 0.5167454066356971
+      },
+      "0.1": {
+        "mae": 0.5275258887037195,
+        "kappa_w": 0.50192831859443
+      },
+      "0.2": {
+        "mae": 0.5437058762819201,
+        "kappa_w": 0.47421293500099493
+      }
+    }
+  },
+  "missingness_catboost": {
+    "red": {
+      "0.05": {
+        "mae": 0.46310307479213825,
+        "kappa_w": 0.5706833789920066,
+        "masked_cells": 182,
+        "n_cells": 3520
+      },
+      "0.1": {
+        "mae": 0.4754754209037236,
+        "kappa_w": 0.5308096580089878,
+        "masked_cells": 349,
+        "n_cells": 3520
+      }
+    },
+    "white": {
+      "0.05": {
+        "mae": 0.5303108644171975,
+        "kappa_w": 0.48523251591058836,
+        "masked_cells": 533,
+        "n_cells": 10769
+      },
+      "0.1": {
+        "mae": 0.5350322808501857,
+        "kappa_w": 0.47466447965565994,
+        "masked_cells": 1113,
+        "n_cells": 10769
+      }
+    }
+  },
+  "cross_type": {
+    "white_model_on_red": {
+      "mae": 0.9163085120020551,
+      "kappa_w": 0.2082275485175783,
+      "note": "Kito vyno tipo testo aibė; tai ne veikimo režimas."
+    },
+    "red_model_on_white": {
+      "mae": 0.6671414811300117,
+      "kappa_w": 0.37491677213291863,
+      "note": "Kito vyno tipo testo aibė; tai ne veikimo režimas."
+    }
+  },
+  "random_split": {
+    "red": {
+      "note": "Diagnostika, nenaudojama modelio pasirinkimui.",
+      "overlapping_groups": 74,
+      "metrics": {
+        "mae": 0.40280324637365084,
+        "kappa_w": 0.619047619047619
+      },
+      "grouped_xgb_mae": 0.46380463937682065
+    },
+    "white": {
+      "note": "Diagnostika, nenaudojama modelio pasirinkimui.",
+      "overlapping_groups": 274,
+      "metrics": {
+        "mae": 0.47372916359040107,
+        "kappa_w": 0.6106791898475682
+      },
+      "grouped_xgb_mae": 0.5322430107587486
+    }
+  }
+}

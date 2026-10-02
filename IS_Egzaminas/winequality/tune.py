@@ -1,156 +1,156 @@
-"""Hyperparameter search on the training block only (never the frozen test)."""
+"""Train-only GroupKFold paieška. Testo aibė į šį modulį nepatenka."""
 
 from __future__ import annotations
 
-import numpy as np
-from scipy.stats import loguniform
-from sklearn.model_selection import GroupKFold, RandomizedSearchCV
-from sklearn.pipeline import Pipeline
+import optuna
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
-from winequality.baselines import linear_pipeline, mean_predictor
-from winequality.config import DEFAULT_SEED, INNER_CV_SPLITS, MLP_N_ITER, RBF_N_ITER, RF_N_ITER, SVR_N_ITER
-from winequality.forest import forest_pipeline
-from winequality.mlp import mlp_pipeline
-from winequality.rbf import rbf_pipeline
-from winequality.svr_model import data_driven_epsilon, svr_pipeline
+from winequality.catboost_model import catboost_complexity, make_catboost, suggest_catboost
+from winequality.corn import corn_complexity, suggest_corn
+from winequality.corn import CornRegressor
+from winequality.metrics import mae, quadratic_weighted_kappa
+from winequality.splits import stratify_label
+from winequality.svr_model import suggest_svr, svr_complexity, svr_pipeline
+from winequality.xgb_ordinal import XGBOrdinalRegressor, suggest_xgb, xgb_complexity
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+SUGGEST = {
+    "xgb_ordinal": suggest_xgb,
+    "catboost": suggest_catboost,
+    "corn": suggest_corn,
+    "svr": suggest_svr,
+}
+COMPLEXITY = {
+    "xgb_ordinal": xgb_complexity,
+    "catboost": catboost_complexity,
+    "corn": corn_complexity,
+    "svr": svr_complexity,
+}
 
 
-def _group_cv(groups: np.ndarray, n_splits: int = INNER_CV_SPLITS) -> GroupKFold:
-    n_groups = len(np.unique(groups))
-    splits = max(2, min(n_splits, n_groups))
-    return GroupKFold(n_splits=splits)
+def _jsonable(params: dict) -> dict:
+    out = {}
+    for key, value in params.items():
+        if isinstance(value, tuple):
+            out[key] = list(value)
+        elif isinstance(value, (int, float, str, bool)) or value is None:
+            out[key] = value
+        else:
+            out[key] = str(value)
+    return out
 
 
-def tune_svr(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    kernel: str = "rbf",
-    seed: int = DEFAULT_SEED,
-    n_iter: int = SVR_N_ITER,
-) -> tuple[Pipeline, dict]:
-    pipe = svr_pipeline(kernel=kernel, seed=seed)
-    eps0 = data_driven_epsilon(y)
-    param_dist = {
-        "svr__C": loguniform(2**-2, 2**6),
-        "svr__epsilon": [0.05, 0.1, 0.2, 0.3, 0.5, round(eps0, 3)],
-        "svr__gamma": loguniform(2**-7, 2**1) if kernel == "rbf" else ["scale"],
+def make_model(name: str, params: dict, cfg: dict, seed: int, feature_names: list[str] | None = None):
+    params = dict(params)
+    if name == "xgb_ordinal":
+        return XGBOrdinalRegressor(
+            seed=seed,
+            n_jobs=int(cfg.get("n_jobs", 1)),
+            feature_names=feature_names,
+            **params,
+        )
+    if name == "catboost":
+        return make_catboost(
+            seed=seed,
+            thread_count=int(cfg.get("n_jobs", 1)),
+            feature_names=feature_names,
+            **params,
+        )
+    if name == "corn":
+        params.pop("n_layers", None)
+        params.pop("units", None)
+        hidden = params.get("hidden")
+        if isinstance(hidden, list):
+            params["hidden"] = tuple(hidden)
+        return CornRegressor(
+            seed=seed,
+            feature_names=feature_names,
+            max_epochs=int(cfg["corn"]["max_epochs"]),
+            patience=int(cfg["corn"]["patience"]),
+            **params,
+        )
+    if name == "svr":
+        return svr_pipeline(seed=seed, feature_names=feature_names, **params)
+    raise KeyError(name)
+
+
+def _fit(model, x, y, groups):
+    if isinstance(model, CornRegressor):
+        model.fit(x, y, groups=groups)
+    else:
+        model.fit(x, y)
+    return model
+
+
+def _folds(x, y, groups, n_splits: int, seed: int):
+    stratum = stratify_label(y)
+    try:
+        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        return list(splitter.split(x, stratum, groups))
+    except ValueError:
+        splitter = GroupKFold(n_splits=n_splits)
+        return list(splitter.split(x, y, groups))
+
+
+def select_trial(records: list[dict]) -> dict:
+    """Mažiausias MAE; jei MAE skiriasi < 0,01, didesnė κw ir paprastesnis modelis."""
+    usable = [row for row in records if row.get("mae", 1e9) < 10]
+    if not usable:
+        raise RuntimeError("Hiperparametrų paieška neturi sėkmingų bandymų")
+    best_mae = min(row["mae"] for row in usable)
+    pool = [row for row in usable if row["mae"] <= best_mae + 0.01]
+    pool.sort(key=lambda row: (-row["kappa"], row["complexity"], row["number"]))
+    return pool[0]
+
+
+def tune_model(name: str, x, y, groups, cfg: dict, seed: int, feature_names: list[str] | None = None) -> dict:
+    n_trials = int(cfg["trials"][name])
+    n_splits = int(cfg["inner_splits"])
+
+    def objective(trial: optuna.Trial) -> float:
+        params = SUGGEST[name](trial)
+        fold_mae = []
+        fold_kappa = []
+        for train_idx, valid_idx in _folds(x, y, groups, n_splits, seed):
+            model = make_model(name, params, cfg, seed, feature_names)
+            _fit(model, x[train_idx], y[train_idx], groups[train_idx])
+            pred = model.predict(x[valid_idx])
+            fold_mae.append(mae(y[valid_idx], pred))
+            fold_kappa.append(quadratic_weighted_kappa(y[valid_idx], pred))
+        mean_mae = float(sum(fold_mae) / len(fold_mae))
+        mean_kappa = float(sum(fold_kappa) / len(fold_kappa))
+        trial.set_user_attr("kappa", mean_kappa)
+        trial.set_user_attr("complexity", COMPLEXITY[name](params))
+        trial.set_user_attr("params", _jsonable(params))
+        trial.set_user_attr("mae_folds", fold_mae)
+        return mean_mae
+
+    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
+    study.optimize(objective, n_trials=n_trials, catch=(Exception,))
+    records = []
+    for trial in study.trials:
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            continue
+        records.append(
+            {
+                "number": trial.number,
+                "mae": float(trial.value),
+                "kappa": float(trial.user_attrs.get("kappa", 0.0)),
+                "complexity": float(trial.user_attrs.get("complexity", 0.0)),
+                "params": trial.user_attrs.get("params", {}),
+                "mae_folds": trial.user_attrs.get("mae_folds", []),
+            }
+        )
+    chosen = select_trial(records)
+    model = make_model(name, chosen["params"], cfg, seed, feature_names)
+    _fit(model, x, y, groups)
+    return {
+        "model": model,
+        "chosen": chosen,
+        "trials": records,
+        "test_used": False,
+        "n_train": int(len(y)),
+        "n_trials": n_trials,
+        "inner_splits": n_splits,
     }
-    search = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        scoring="neg_mean_absolute_error",
-        cv=_group_cv(groups),
-        random_state=seed,
-        n_jobs=-1,
-        refit=True,
-    )
-    search.fit(X, y, groups=groups)
-    return search.best_estimator_, {
-        "best_params": search.best_params_,
-        "best_cv_mae": float(-search.best_score_),
-        "eps0": eps0,
-        "n_iter": n_iter,
-    }
-
-
-def tune_rf(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    seed: int = DEFAULT_SEED,
-    n_iter: int = RF_N_ITER,
-) -> tuple[Pipeline, dict]:
-    pipe = forest_pipeline(seed=seed)
-    param_dist = {
-        "rf__n_estimators": [100, 200, 400],
-        "rf__max_depth": [None, 8, 12, 16],
-        "rf__min_samples_leaf": [1, 2, 4],
-    }
-    search = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        scoring="neg_mean_absolute_error",
-        cv=_group_cv(groups),
-        random_state=seed,
-        n_jobs=-1,
-        refit=True,
-    )
-    search.fit(X, y, groups=groups)
-    return search.best_estimator_, {
-        "best_params": search.best_params_,
-        "best_cv_mae": float(-search.best_score_),
-        "n_iter": n_iter,
-    }
-
-
-def tune_mlp(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    seed: int = DEFAULT_SEED,
-    n_iter: int = MLP_N_ITER,
-) -> tuple[Pipeline, dict]:
-    pipe = mlp_pipeline(seed=seed)
-    param_dist = {
-        "mlp__hidden_layer_sizes": [(8,), (16,), (32,), (64,), (16, 8), (32, 16)],
-        "mlp__activation": ["relu", "tanh"],
-        "mlp__alpha": loguniform(1e-5, 1e-2),
-        "mlp__learning_rate_init": loguniform(3e-4, 3e-3),
-    }
-    search = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        scoring="neg_mean_absolute_error",
-        cv=_group_cv(groups),
-        random_state=seed,
-        n_jobs=-1,
-        refit=True,
-    )
-    search.fit(X, y, groups=groups)
-    return search.best_estimator_, {
-        "best_params": {k: (list(v) if isinstance(v, tuple) else v) for k, v in search.best_params_.items()},
-        "best_cv_mae": float(-search.best_score_),
-        "n_iter": n_iter,
-    }
-
-
-def tune_rbf(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    seed: int = DEFAULT_SEED,
-    n_iter: int = RBF_N_ITER,
-) -> tuple[Pipeline, dict]:
-    pipe = rbf_pipeline(seed=seed)
-    param_dist = {
-        "rbf__n_centers": [15, 25, 40, 60, 80],
-        "rbf__ridge": loguniform(1e-4, 1.0),
-        "rbf__n_neighbors": [1, 2, 3],
-    }
-    search = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        scoring="neg_mean_absolute_error",
-        cv=_group_cv(groups),
-        random_state=seed,
-        n_jobs=-1,
-        refit=True,
-    )
-    search.fit(X, y, groups=groups)
-    return search.best_estimator_, {
-        "best_params": search.best_params_,
-        "best_cv_mae": float(-search.best_score_),
-        "n_iter": n_iter,
-    }
-
-
-def fit_baselines(X: np.ndarray, y: np.ndarray) -> dict[str, object]:
-    mean_m = mean_predictor(y)
-    lin = linear_pipeline()
-    lin.fit(X, y)
-    return {"mean": mean_m, "linear": lin}

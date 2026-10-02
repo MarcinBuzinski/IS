@@ -1,20 +1,36 @@
-"""Download UCI Wine Quality CSVs and verify SHA-256."""
+"""UCI Wine Quality atsisiuntimas, SHA-256 ir schemos patikra."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import urllib.request
 from pathlib import Path
 
-from winequality.config import DATA_RAW, RED_SHA256, RED_URL, WHITE_SHA256, WHITE_URL
+import pandas as pd
+
+from winequality.config import (
+    DATA_RAW,
+    FEATURE_NAMES,
+    RED_SHA256,
+    RED_URL,
+    TARGET,
+    WHITE_SHA256,
+    WHITE_URL,
+)
+
+SOURCES = {
+    "red": (RED_URL, RED_SHA256, "winequality-red.csv"),
+    "white": (WHITE_URL, WHITE_SHA256, "winequality-white.csv"),
+}
 
 
 def sha256_of(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _download(url: str, dest: Path, expected: str) -> Path:
@@ -26,19 +42,54 @@ def _download(url: str, dest: Path, expected: str) -> Path:
     digest = sha256_of(tmp)
     if digest != expected:
         tmp.unlink(missing_ok=True)
-        raise ValueError(f"SHA-256 mismatch for {dest.name}: got {digest}, expected {expected}")
+        raise ValueError(f"SHA-256 neatitinka {dest.name}: gauta {digest}, tikėtasi {expected}")
     tmp.replace(dest)
     return dest
 
 
 def fetch_raw() -> dict[str, Path]:
-    """Return paths to red and white CSVs, downloading if needed."""
-    red = _download(RED_URL, DATA_RAW / "winequality-red.csv", RED_SHA256)
-    white = _download(WHITE_URL, DATA_RAW / "winequality-white.csv", WHITE_SHA256)
-    return {"red": red, "white": white}
+    """Grąžina raudono ir balto vyno CSV kelius. Trūkstamus failus atsisiunčia."""
+    paths = {}
+    for kind, (url, digest, name) in SOURCES.items():
+        paths[kind] = _download(url, DATA_RAW / name, digest)
+    return paths
 
 
-if __name__ == "__main__":
-    paths = fetch_raw()
-    for name, path in paths.items():
-        print(f"{name}: {path}  sha256={sha256_of(path)}")
+def read_wine_csv(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path, sep=";")
+    expected = FEATURE_NAMES + [TARGET]
+    missing = [column for column in expected if column not in frame.columns]
+    if missing:
+        raise ValueError(f"CSV schema neturi stulpelių {missing}")
+    return frame.loc[:, expected].copy()
+
+
+def audit_frame(frame: pd.DataFrame, kind: str) -> dict:
+    """Duomenų kortelės santrauka: apimtis, dublikatai, balų dažniai, diapazonai."""
+    features = frame[FEATURE_NAMES]
+    duplicate_rows = int(features.duplicated(keep=False).sum())
+    quality = frame[TARGET].astype(int)
+    ranges = {}
+    for name in FEATURE_NAMES:
+        column = features[name]
+        ranges[name] = {
+            "min": float(column.min()),
+            "max": float(column.max()),
+            "mean": float(column.mean()),
+            "missing": int(column.isna().sum()),
+        }
+    return {
+        "kind": kind,
+        "n_rows": int(len(frame)),
+        "n_features": len(FEATURE_NAMES),
+        "missing_cells": int(features.isna().sum().sum()),
+        "duplicate_feature_rows": duplicate_rows,
+        "quality_counts": {str(k): int(v) for k, v in quality.value_counts().sort_index().items()},
+        "feature_ranges": ranges,
+        "source": "UCI Wine Quality, Cortez et al. 2009, DOI 10.24432/C56S3T",
+    }
+
+
+def write_audit(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

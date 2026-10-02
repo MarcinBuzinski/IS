@@ -1,19 +1,16 @@
-"""Shared constants: seeds, paths, feature names, class rules, physical bounds.
-
-Fixed seeds (exam requirement). Split seed is independent of model RNG so that
-every method sees the same frozen 80/20 group-aware hold-out.
-"""
+"""Keliai, požymiai, fizinės ribos, sėklos ir numatytasis paieškos biudžetas."""
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_RAW = ROOT / "data" / "raw"
 DATA_SPLITS = ROOT / "data" / "splits"
 ARTIFACTS = ROOT / "artifacts"
 RESULTS = ROOT / "results"
-FIGURES = RESULTS / "figures"
 
 SPLIT_SEED = 0
 MODEL_SEEDS = (0, 1, 2)
@@ -38,10 +35,8 @@ FEATURE_NAMES = [
     "alcohol",
 ]
 TARGET = "quality"
-TYPE_COL = "type"  # 0 = red, 1 = white
+TYPE_COL = "type"
 
-# log1p set from the plan (skew > 1 on at least one wine type, excluding volatile
-# acidity / citric acid which are only skewed for white).
 LOG1P_FEATURES = [
     "residual sugar",
     "chlorides",
@@ -50,7 +45,14 @@ LOG1P_FEATURES = [
     "sulphates",
 ]
 
-# Conservative physical / laboratory bounds used at serving time.
+FEATURE_GROUPS = {
+    "acidity": ["fixed acidity", "volatile acidity", "citric acid", "pH"],
+    "sugar": ["residual sugar"],
+    "sulfur": ["free sulfur dioxide", "total sulfur dioxide", "sulphates"],
+    "chlorides": ["chlorides"],
+    "body": ["density", "alcohol"],
+}
+
 PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
     "fixed acidity": (3.0, 20.0),
     "volatile acidity": (0.0, 2.0),
@@ -67,13 +69,53 @@ PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
 
 SCORE_MIN = 3
 SCORE_MAX = 9
+RANKS = tuple(range(SCORE_MIN, SCORE_MAX + 1))
 CLASS_LOW_MAX = 4
 CLASS_HIGH_MIN = 7
-CLASS_NAMES = ("low", "medium", "high")  # žema / vidutinė / aukšta
+CLASS_NAMES = ("žema", "vidutinė", "aukšta")
 
-# Inner HPO is on the training block only (never the frozen test).
-INNER_CV_SPLITS = 3
-SVR_N_ITER = 12
-RF_N_ITER = 8
-MLP_N_ITER = 8
-RBF_N_ITER = 8
+# Plano 7 lentelė: bandymai vienam vyno tipui, viduje 5 klostės.
+DEFAULT_TRIALS = {
+    "xgb_ordinal": 50,
+    "catboost": 50,
+    "corn": 30,
+    "svr": 40,
+}
+INNER_CV_SPLITS = 5
+
+
+def load_config(path: str | Path) -> dict:
+    """Įkelia YAML ir užpildo numatytąsias plano reikšmes."""
+    with Path(path).open(encoding="utf-8") as handle:
+        cfg = yaml.safe_load(handle) or {}
+    cfg.setdefault("seed", DEFAULT_SEED)
+    cfg.setdefault("seeds", list(MODEL_SEEDS))
+    cfg.setdefault("wines", ["red", "white"])
+    cfg.setdefault("test_size", 0.2)
+    cfg.setdefault("inner_splits", INNER_CV_SPLITS)
+    cfg.setdefault("n_jobs", 1)
+    cfg.setdefault("bootstrap", 1000)
+    cfg.setdefault("output_dir", "results")
+    cfg.setdefault("protocol", "full")
+    cfg.setdefault("ablation", True)
+    cfg.setdefault("robustness", True)
+    cfg.setdefault("errors", True)
+    cfg.setdefault("shap", True)
+    trials = dict(DEFAULT_TRIALS)
+    trials.update(cfg.get("trials") or {})
+    cfg["trials"] = trials
+    corn = {
+        "max_epochs": 40,
+        "patience": 6,
+    }
+    corn.update(cfg.get("corn") or {})
+    cfg["corn"] = corn
+    return cfg
+
+
+def output_paths(cfg: dict) -> tuple[Path, Path]:
+    results = ROOT / cfg["output_dir"]
+    artifacts = results / "artifacts"
+    results.mkdir(parents=True, exist_ok=True)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    return results, artifacts
