@@ -62,38 +62,56 @@ f2 = @(t, u) (0 - u) / tau;
 t_ode = [t_ode1; t_ode2(2:end)];
 U_ode = [U_ode1; U_ode2(2:end)];
 
-%% 2. Analitinis sprendinys (dsolve), dviem intervalais
+%% 2. Analitinis sprendinys
 % 0 <= t <= 0.5, Uin = 1:
 %   du/dt = (1 - u) / tau,   u(0) = 0
 %   u(t) = 1 - exp(-t/tau)
 %
-% 0.5 < t <= 1, Uin = 0, pradinė sąlyga – reikšmė ties t = 0.5:
+% 0.5 <= t <= 1, Uin = 0, pradinė sąlyga – reikšmė ties t = 0.5:
 %   du/dt = -u / tau
 %   u(t) = u(0.5) * exp(-(t - 0.5)/tau)
-
-syms u(t)
-tau_s = sym(1)/10;
-
-ode1 = diff(u, t) == (1 - u) / tau_s;
-u1(t) = dsolve(ode1, u(0) == 0);
-u1(t) = simplify(u1);
-
-u_pus = u1(sym(1)/2);
-ode2 = diff(u, t) == (0 - u) / tau_s;
-u2(t) = dsolve(ode2, u(sym(1)/2) == u_pus);
-u2(t) = simplify(u2);
-
-fprintf('Diferencialinė lygtis: dUout/dt = (Uin(t) - Uout) / tau, tau = 0.1 s\n');
-fprintf('Analitinis sprendinys, 0 <= t <= 0.5 s:\n');
-disp(u1);
-fprintf('Analitinis sprendinys, 0.5 < t <= 1 s:\n');
-disp(u2);
+%
+% Jei yra Symbolic Math Toolbox, formulės gaunamos su dsolve.
+% Be šio įrankių rinkinio naudojamos tos pačios uždaros formulės.
 
 t_anal = t_euler;
-U_anal = zeros(size(t_anal));
 iki_pus = t_anal <= t_switch;
-U_anal(iki_pus)  = double(u1(t_anal(iki_pus)));
-U_anal(~iki_pus) = double(u2(t_anal(~iki_pus)));
+U_anal = zeros(size(t_anal));
+U_anal(iki_pus) = 1 - exp(-t_anal(iki_pus) / tau);
+U_switch = 1 - exp(-t_switch / tau);
+U_anal(~iki_pus) = U_switch * exp(-(t_anal(~iki_pus) - t_switch) / tau);
+
+fprintf('Diferencialinė lygtis: dUout/dt = (Uin(t) - Uout) / tau, tau = %.1f s\n', tau);
+fprintf('  0 <= t <= 0.5 s:  Uout(t) = 1 - exp(-t/tau)\n');
+fprintf('  0.5 <= t <= 1 s:  Uout(t) = Uout(0.5) * exp(-(t - 0.5)/tau)\n');
+
+% dsolve veikia tik su Symbolic Math Toolbox. Be jo skriptas naudoja
+% tas pačias uždaras formules ir vis tiek nubraižo palyginimą.
+if ~isempty(ver('symbolic'))
+    try
+        syms u(t)
+        tau_s = sym(tau);
+
+        ode1 = diff(u, t) == (1 - u) / tau_s;
+        u1(t) = simplify(dsolve(ode1, u(0) == 0));
+
+        u_pus = u1(t_switch);
+        ode2 = diff(u, t) == (0 - u) / tau_s;
+        u2(t) = simplify(dsolve(ode2, u(t_switch) == u_pus));
+
+        fprintf('Analitinis sprendinys (dsolve), 0 <= t <= 0.5 s:\n');
+        disp(u1);
+        fprintf('Analitinis sprendinys (dsolve), 0.5 <= t <= 1 s:\n');
+        disp(u2);
+
+        U_anal(iki_pus)  = double(u1(t_anal(iki_pus)));
+        U_anal(~iki_pus) = double(u2(t_anal(~iki_pus)));
+    catch ME
+        fprintf('dsolve nepavyko (%s). Paliekamas analitinis sprendinys.\n', ME.message);
+    end
+else
+    fprintf('Symbolic Math Toolbox nerastas, todėl dsolve nekviečiamas.\n');
+end
 
 % ode45 taškai perkeliami ant tos pačios laiko ašies, kad būtų galima
 % nubraižyti skirtumą
@@ -102,8 +120,8 @@ U_ode_t = interp1(t_ode, U_ode, t_anal, 'pchip');
 skirt_euler = U_euler - U_anal;
 skirt_ode   = U_ode_t - U_anal;
 
-fprintf('\nDidžiausias |Euler - dsolve| = %.6e V\n', max(abs(skirt_euler)));
-fprintf('Didžiausias |ode45 - dsolve| = %.6e V\n', max(abs(skirt_ode)));
+fprintf('\nDidžiausias |Euler - analitinis| = %.6e V\n', max(abs(skirt_euler)));
+fprintf('Didžiausias |ode45 - analitinis| = %.6e V\n', max(abs(skirt_ode)));
 
 %% 3. Palyginimo grafikai
 figure(1)
@@ -115,7 +133,7 @@ grid on
 xlabel('t, s')
 ylabel('U_{out}(t), V')
 title('RC grandinės išėjimo įtampa')
-legend('Eulerio metodas', 'ode45', 'dsolve (analitinis)', 'Location', 'best')
+legend('Eulerio metodas', 'ode45', 'analitinis', 'Location', 'best')
 
 figure(2)
 plot(t_anal, skirt_euler, 'b', 'LineWidth', 1.5)
@@ -125,4 +143,4 @@ grid on
 xlabel('t, s')
 ylabel('\Delta U_{out}(t), V')
 title('Skaitinio ir analitinio sprendinių skirtumas')
-legend('Euler - dsolve', 'ode45 - dsolve', 'Location', 'best')
+legend('Euler - analitinis', 'ode45 - analitinis', 'Location', 'best')
